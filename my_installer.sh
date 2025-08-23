@@ -33,7 +33,6 @@ readonly BACKPORTS_VERSION=${DEBIAN_VERSION}  # TODO append "-backports" when av
 readonly USE_LUKS=true
 readonly LUKS_PASSWORD=luks2
 readonly USE_TPM_TO_UNLOCK_LUKS=true
-readonly LUKS_TPM_KEYFILE=luks_tpm.key
 
 #readonly ENABLE_POPCON=false
 
@@ -368,16 +367,25 @@ function target_code()
 
                 notify "creating luks key for tpm enrollment"
 
-                dd if=/dev/random of=${LUKS_TPM_KEYFILE} bs=512 count=1
-                chmod 600 ${LUKS_TPM_KEYFILE}
+                # Create a secure temporary file
+                tmp_key_file=$(mktemp /tmp/safe.XXXXXX)
+
+                # Set restrictive permissions (optional, but recommended for sensitive data)
+                chmod 600 "$tmp_key_file"
+
+                # Write random data to the temporary file
+                dd if=/dev/random of="$tmp_key_file" bs=512 count=1 status=none
 
                 notify "adding tpm key to luks"
 
-                printf '%s' "$LUKS_PASSWORD" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${LUKS_TPM_KEYFILE}"
+                printf '%s' "$LUKS_PASSWORD" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
 
                 notify "enrolling luks key in tpm"
 
-                systemd-cryptenroll --unlock-key-file=${LUKS_TPM_KEYFILE} --tpm2-device=auto ${LUKS_ROOT_PARTITION} --tpm2-pcrs="7+14"
+                systemd-cryptenroll --unlock-key-file=${tmp_key_file} --tpm2-device=auto ${LUKS_ROOT_PARTITION} --tpm2-pcrs="7+14"
+
+                # If we reach here, all operations succeeded; securely delete the file
+                shred -u "$tmp_key_file"
 
                 sudo sed -i 's/$/ rd.luks.options=tpm2-device=auto/' /etc/kernel/cmdline
 
