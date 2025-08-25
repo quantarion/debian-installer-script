@@ -7,43 +7,11 @@
 # script will modify EUFI EFI variables
 # only use to install debian on the copmputer on which the script is executed
 
-set -euo pipefail
 # -e: exit on error
 # -u: exit on undefined variables
 # -o pipefail: exit if any command in a pipeline fails
 
-
-# edit this:
-readonly DISK=/dev/sdb
-readonly USER_FULL_NAME="User User"
-readonly USERNAME=user
-readonly USER_PASSWORD=user2
-
-readonly LOCALE=en_CA.UTF-8
-readonly KEYMAP=us
-readonly TIMEZONE=America/Montreal
-
-readonly DEBIAN_VERSION=trixie
-readonly HOSTNAME=trixie-rescue
-readonly BACKPORTS_VERSION=${DEBIAN_VERSION}  # TODO append "-backports" when available
-
-# Only if you must, sudo is largely prefered
-#readonly ROOT_PASSWORD=root2
-
-readonly USE_LUKS=true
-readonly LUKS_PASSWORD=luks2
-readonly USE_TPM_TO_UNLOCK_LUKS=true
-
-#readonly ENABLE_POPCON=false
-
-#readonly NVIDIA_PACKAGE=
-#readonly SSH_PUBLIC_KEY=
-#readonly AFTER_INSTALLED_CMD=
-
-readonly TARGET=/target
-
-readonly BTRFS_FSFLAGS="compress=zstd:1"
-readonly BTRFS_ADMIN_MOUNT=/mnt/btrfs_admin_mount
+set -euo pipefail
 
 g_kernel_params="rw quiet splash"
 g_fstab_content=""
@@ -51,9 +19,52 @@ g_fstab_content=""
 # g_swap_size
 g_luks_root_partition=
 
+function get_parameters()
+{
+    echo "Original arguments: $@"
+
+    echo "Without first argument: ${@:2}"
+
+    eval "${@:2}"
+
+    if [ -f my_installer_params.sh ]; then
+        source my_installer_params.sh
+    fi
+
+    readonly p_disk=$DISK
+    readonly p_target=$TARGET
+
+    readonly p_user_full_name=$USER_FULL_NAME
+    readonly p_username=$USERNAME
+    readonly p_user_password=$USER_PASSWORD
+
+    readonly p_locale=$LOCALE
+    readonly p_keymap=$KEYMAP
+    readonly p_timezone=$TIMEZONE
+
+    readonly p_debian_version=$DEBIAN_VERSION
+    readonly p_hostname=$HOSTNAME
+    readonly p_backports_version=$BACKPORTS_VERSION
+
+    #readonly p_root_password=$ROOT_PASSWORD
+
+    readonly p_use_luks=$USE_LUKS
+    readonly p_luks_password=$LUKS_PASSWORD
+    readonly p_use_tpm_to_unlock_luks=$USE_TPM_TO_UNLOCK_LUKS
+
+    readonly p_btrfs_fsflags=$BTRFS_FSFLAGS
+    readonly p_btrfs_admin_mount=$BTRFS_ADMIN_MOUNT
+
+    #readonly p_enable_popcon=$ENABLE_POPCON
+
+    #readonly p_nvidia_package=$NVIDIA_PACKAGE
+    #readonly p_ssh_public_key=$SSH_PUBLIC_KEY
+    #readonly p_after_installed_cmd=$AFTER_INSTALLED_CMD
+}
+
 function notify ()
 {
-    echo -e "\033[32m$@\033[0m"
+    echo -e "\033[32m$*\033[0m"
 }
 
 function check_tpm()
@@ -66,7 +77,6 @@ function check_tpm()
         g_tpm_available=false
     fi
 }
-
 
 function setup_host()
 {
@@ -87,7 +97,7 @@ function prepare_installation_disk()
     local installation_disk=$1
 
     notify "setting up installation disk ${installation_disk}"
-    wipefs -a ${installation_disk}
+    wipefs -a "${installation_disk}"
 
     # alternatively the disk can be overwritten with a random pattern which is very slow
 
@@ -109,13 +119,13 @@ function prepare_installation_disk()
 function setup_system_partition()
 {
     local installation_disk=$1
-    local efi_system_partition_uuid=$(uuidgen)
+    local efi_system_partition_uuid; efi_system_partition_uuid=$(uuidgen)
     local efi_system_partition_type="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 
     notify "creating system partition with uuid ${efi_system_partition_uuid} on ${installation_disk}"
     sgdisk  --new=1:2048:+1G --typecode=1:${efi_system_partition_type} \
             --change-name=1:"EFI system partition" \
-            --partition-guid=1:${efi_system_partition_uuid} ${installation_disk}
+            --partition-guid=1:"${efi_system_partition_uuid}" "${installation_disk}"
 
     # sync & reread partition tables
     partprobe
@@ -123,8 +133,8 @@ function setup_system_partition()
 
     notify "formatting ${efi_system_partition_uuid}"
     local efi_system_partition=/dev/disk/by-partuuid/${efi_system_partition_uuid}
-    ls ${efi_system_partition}
-    mkfs.vfat ${efi_system_partition}
+    ls "${efi_system_partition}"
+    mkfs.vfat "${efi_system_partition}"
 
     g_fstab_content+="PARTUUID=${efi_system_partition_uuid} /boot/efi vfat defaults,umask=077 0 2"
     g_fstab_content+=$'\n'
@@ -137,9 +147,9 @@ function mount_system_partition()
 {
     efi_system_partition_uuid=$1
     local efi_system_partition=/dev/disk/by-partuuid/${efi_system_partition_uuid}
-    notify "mounting system partition ${efi_system_partition} on ${TARGET}/boot/efi"
-    mkdir -p ${TARGET}/boot/efi
-    mount ${efi_system_partition} ${TARGET}/boot/efi -o umask=077
+    notify "mounting system partition ${efi_system_partition} on ${p_target}/boot/efi"
+    mkdir -p "${p_target}"/boot/efi
+    mount "${efi_system_partition}" "${p_target}"/boot/efi -o umask=077
 }
 
 function setup_root_partition()
@@ -147,7 +157,7 @@ function setup_root_partition()
 
     local installation_disk=$1
 
-    local root_partition_uuid=$(uuidgen)
+    local root_partition_uuid; root_partition_uuid=$(uuidgen)
 
     local root_partition_type="4f68bce3-e8cd-4db1-96e7-fbcaf984b709"
 
@@ -156,8 +166,8 @@ function setup_root_partition()
     sgdisk --new=2:0:0 \
            --typecode=2:${root_partition_type} \
            --change-name=2:"Root partition" \
-           --partition-guid=2:${root_partition_uuid} \
-           $installation_disk
+           --partition-guid=2:"${root_partition_uuid}" \
+           "$installation_disk"
 
     # sync & reread partition tables
     partprobe
@@ -180,12 +190,11 @@ function setup_luks()
     udevadm settle
 
     # password is always present
-    #echo -n "${LUKS_PASSWORD}" | cryptsetup luksFormat ${root_partition} --type luks2 --key-file=-
-    printf '%s' "$LUKS_PASSWORD" | cryptsetup luksFormat "$root_partition" --type luks2 --batch-mode --key-file -
+    #echo -n "${p_luks_password}" | cryptsetup luksFormat ${root_partition} --type luks2 --key-file=-
+    printf '%s' "$p_luks_password" | cryptsetup luksFormat "$root_partition" --type luks2 --batch-mode --key-file -
 
     notify "open luks on root"
-    echo "printf '%s' "$LUKS_PASSWORD" | cryptsetup luksOpen "$root_partition" root --key-file -"
-    printf '%s' "$LUKS_PASSWORD" | cryptsetup luksOpen "$root_partition" root --key-file -
+    printf '%s' "$p_luks_password" | cryptsetup luksOpen "$root_partition" root --key-file -
 
     # return luks_root_partition
     g_luks_root_device=/dev/mapper/root
@@ -198,76 +207,76 @@ function setup_btrfs()
 {
     local btrfs_root_partition=$1
 
-    local btrfs_uuid=$(uuidgen)
+    local btrfs_uuid; btrfs_uuid=$(uuidgen)
     notify "create root filesystem on ${btrfs_root_partition}"
-    mkfs.btrfs -U ${btrfs_uuid} ${btrfs_root_partition}
+    mkfs.btrfs -U "${btrfs_uuid}" "${btrfs_root_partition}"
 
-    notify "mount btrfs admin subvolume on ${BTRFS_ADMIN_MOUNT}"
-    mkdir -p ${BTRFS_ADMIN_MOUNT}
-    mount ${btrfs_root_partition} ${BTRFS_ADMIN_MOUNT} -o rw,${BTRFS_FSFLAGS},subvolid=5,skip_balance
+    notify "mount btrfs admin subvolume on ${p_btrfs_admin_mount}"
+    mkdir -p "${p_btrfs_admin_mount}"
+    mount "${btrfs_root_partition}" "${p_btrfs_admin_mount}" -o rw,"${p_btrfs_fsflags}",subvolid=5,skip_balance
 
-    notify "create @ subvolume on ${BTRFS_ADMIN_MOUNT}"
-    btrfs subvolume create ${BTRFS_ADMIN_MOUNT}/@
+    notify "create @ subvolume on ${p_btrfs_admin_mount}"
+    btrfs subvolume create "${p_btrfs_admin_mount}"/@
 
-    notify "create @home subvolume on ${BTRFS_ADMIN_MOUNT}"
-    btrfs subvolume create ${BTRFS_ADMIN_MOUNT}/@home
+    notify "create @home subvolume on ${p_btrfs_admin_mount}"
+    btrfs subvolume create "${p_btrfs_admin_mount}"/@home
 
-    notify "create @swap subvolume for swap file on ${BTRFS_ADMIN_MOUNT}"
-    btrfs subvolume create ${BTRFS_ADMIN_MOUNT}/@swap
-    chmod 700 ${BTRFS_ADMIN_MOUNT}/@swap
+    notify "create @swap subvolume for swap file on ${p_btrfs_admin_mount}"
+    btrfs subvolume create "${p_btrfs_admin_mount}"/@swap
+    chmod 700 "${p_btrfs_admin_mount}"/@swap
 
-    notify "mount root and home subvolume on ${TARGET}"
-    mkdir -p ${TARGET}
-    mount ${btrfs_root_partition} ${TARGET} -o ${BTRFS_FSFLAGS},subvol=@
-    mkdir -p ${TARGET}/home
-    mount ${btrfs_root_partition} ${TARGET}/home -o ${BTRFS_FSFLAGS},subvol=@home
+    notify "mount root and home subvolume on ${p_target}"
+    mkdir -p "${p_target}"
+    mount "${btrfs_root_partition}" "${p_target}" -o "${p_btrfs_fsflags}",subvol=@
+    mkdir -p "${p_target}"/home
+    mount "${btrfs_root_partition}" "${p_target}"/home -o "${p_btrfs_fsflags}",subvol=@home
 
-    notify "mount swap subvolume on ${TARGET}"
-    mkdir -p ${TARGET}/swap
-    mount ${btrfs_root_partition} ${TARGET}/swap -o noatime,subvol=@swap
+    notify "mount swap subvolume on ${p_target}"
+    mkdir -p "${p_target}"/swap
+    mount "${btrfs_root_partition}" "${p_target}"/swap -o noatime,subvol=@swap
 
-    notify "make swap file at ${TARGET}/swap/swapfile"
-    btrfs filesystem mkswapfile --size ${g_swap_size}G ${TARGET}/swap/swapfile
+    notify "make swap file at ${p_target}/swap/swapfile"
+    btrfs filesystem mkswapfile --size ${g_swap_size}G "${p_target}"/swap/swapfile
 
-    # this would let host kernel use the swap file on the ${TARGET}, we don't want that
-    # swapon ${TARGET}/swap/swapfile
+    # this would let host kernel use the swap file on the ${p_target}, we don't want that
+    # swapon ${p_target}/swap/swapfile
 
     notify "cleanup administrative mount"
-    umount ${BTRFS_ADMIN_MOUNT}
-    rmdir ${BTRFS_ADMIN_MOUNT}
+    umount "${p_btrfs_admin_mount}"
+    rmdir "${p_btrfs_admin_mount}"
 
-    swapfile_offset=$(btrfs inspect-internal map-swapfile -r ${TARGET}/swap/swapfile)
+    swapfile_offset=$(btrfs inspect-internal map-swapfile -r "${p_target}"/swap/swapfile)
 
-    g_kernel_params="${g_kernel_params} rootfstype=btrfs rootflags=${BTRFS_FSFLAGS},subvol=@ resume=${btrfs_root_partition} resume_offset=${swapfile_offset}"
+    g_kernel_params="${g_kernel_params} rootfstype=btrfs rootflags=${p_btrfs_fsflags},subvol=@ resume=${btrfs_root_partition} resume_offset=${swapfile_offset}"
 
     # this should go with dracut, but not a biggie
     g_kernel_params="${g_kernel_params} rd.auto=1"
 
-    g_fstab_content+="UUID=${btrfs_uuid} / btrfs defaults,subvol=@,${BTRFS_FSFLAGS} 0 1"
+    g_fstab_content+="UUID=${btrfs_uuid} / btrfs defaults,subvol=@,${p_btrfs_fsflags} 0 1"
     g_fstab_content+=$'\n'
-    g_fstab_content+="UUID=${btrfs_uuid} /home btrfs defaults,subvol=@home,${BTRFS_FSFLAGS} 0 1"
+    g_fstab_content+="UUID=${btrfs_uuid} /home btrfs defaults,subvol=@home,${p_btrfs_fsflags} 0 1"
     g_fstab_content+=$'\n'
-    g_fstab_content+="UUID=${btrfs_uuid} /swap btrfs defaults,subvol=@swap,noatime,${BTRFS_FSFLAGS} 0 0"
+    g_fstab_content+="UUID=${btrfs_uuid} /swap btrfs defaults,subvol=@swap,noatime,${p_btrfs_fsflags} 0 0"
     g_fstab_content+=$'\n'
     g_fstab_content+="/swap/swapfile none swap defaults 0 0"
     g_fstab_content+=$'\n'
 
     # return btrfs_uuid
-    g_btrfs_uuid=${btrfs_uuid}
+    # g_btrfs_uuid=${btrfs_uuid}
 }
 
 
 function do_debootstrap()
 {
-    notify "install debian on ${TARGET}"
-    debootstrap --include=locales ${DEBIAN_VERSION} ${TARGET} http://deb.debian.org/debian
+    notify "install debian on ${p_target}"
+    debootstrap --include=locales "${p_debian_version}" "${p_target}" http://deb.debian.org/debian
 }
 
 setup_fstab()
 {
     notify "writing fstab"
     echo -e "${g_fstab_content}"
-    echo "${g_fstab_content}" > ${TARGET}/etc/fstab
+    echo "${g_fstab_content}" > "${p_target}"/etc/fstab
 }
 
 get_sources_list()
@@ -275,13 +284,13 @@ get_sources_list()
     # per https://wiki.debian.org/SourcesList
     echo "Types: deb"
     echo "URIs: http://deb.debian.org/debian/"
-    echo "Suites: ${DEBIAN_VERSION} ${DEBIAN_VERSION}-updates ${DEBIAN_VERSION}-backports"
+    echo "Suites: ${p_debian_version} ${p_debian_version}-updates ${p_debian_version}-backports"
     echo "Components: main contrib non-free non-free-firmware"
     echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
     echo
     echo "Types: deb"
     echo "URIs: http://security.debian.org/debian-security/"
-    echo "Suites: ${DEBIAN_VERSION}-security"
+    echo "Suites: ${p_debian_version}-security"
     echo "Components: main contrib non-free non-free-firmware"
     echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
 }
@@ -289,33 +298,26 @@ get_sources_list()
 function setup_sources_list()
 {
     notify "setup sources list"
-    rm -f ${TARGET}/etc/apt/sources.list
-    get_sources_list > ${TARGET}/etc/apt/sources.list.d/debian.sources
+    rm -f "${p_target}"/etc/apt/sources.list
+    get_sources_list > "${p_target}"/etc/apt/sources.list.d/debian.sources
 }
 
 function setup_firstboot()
 {
     notify "setup locale, keymap, timezone, hostname, root password, kernel command line"
-    echo -e "systemd-firstboot --locale=${LOCALE} \
-    --keymap=${KEYMAP} \
-    --timezone=${TIMEZONE} \
-    --hostname=${HOSTNAME} \
-    --root-password=${USER_PASSWORD} \
-    --kernel-command-line="${g_kernel_params}" \
-    --root=${TARGET}"
 
-    systemd-firstboot --locale=${LOCALE} \
-                      --keymap=${KEYMAP} \
-                      --timezone=${TIMEZONE} \
-                      --hostname=${HOSTNAME} \
+    systemd-firstboot --locale="${p_locale}" \
+                      --keymap="${p_keymap}" \
+                      --timezone="${p_timezone}" \
+                      --hostname="${p_hostname}" \
                       --kernel-command-line="${g_kernel_params}" \
-                      --root=${TARGET} \
+                      --root="${p_target}" \
                       --force
 
     # damn thing will not generate locales, nor set hosts
-    echo "127.0.1.1   $HOSTNAME" >> ${TARGET}/etc/hosts
+    echo "127.0.1.1   $p_hostname" >> "${p_target}"/etc/hosts
     # don't like sed option
-    sed -i "s/# $LOCALE/$LOCALE/" ${TARGET}/etc/locale.gen
+    sed -i "s/# $p_locale/$p_locale/" "${p_target}"/etc/locale.gen
 }
 
 function target_code()
@@ -325,29 +327,31 @@ function target_code()
     notify "generating locales"
     locale-gen
 
-    notify "set up user ${USERNAME} user"
-    adduser --disabled-password --gecos "${USER_FULL_NAME}" ${USERNAME}
-    adduser ${USERNAME} sudo
-    echo ${USERNAME}:${USER_PASSWORD} | chpasswd
+    notify "set up user ${p_username} user"
+    adduser --disabled-password --gecos "${p_user_full_name}" "${p_username}"
+    adduser "${p_username}" sudo
+    echo "${p_username}":"${p_user_password}" | chpasswd
 
     notify "install standard packages"
     apt update -y
     apt install -y dctrl-tools
-    apt install -y $(grep-dctrl -n -s Package -F Priority standard /var/lib/apt/lists/*_Packages)
+    standard_packages=$(echo "$(grep-dctrl -n -s Package -F Priority standard /var/lib/apt/lists/*_Packages)" | xargs)
+ 
+    echo apt install -y "$standard_packages"
 
     notify "install kernel and related packages"
     apt-cache policy linux-image-amd64
     apt-mark showhold
 
-    apt install -y -t ${BACKPORTS_VERSION} linux-image-amd64 firmware-linux plymouth-theme-hamara dracut
-    apt full-upgrade -t ${DEBIAN_VERSION}-security -y
+    apt install -y -t "${p_backports_version}" linux-image-amd64 firmware-linux plymouth-theme-hamara dracut
+    apt full-upgrade -t "${p_debian_version}"-security -y
 
     notify "install systemd packages"
-    apt install -y -t ${BACKPORTS_VERSION} systemd systemd-boot systemd-cryptsetup cryptsetup
+    apt install -y -t "${p_backports_version}" systemd systemd-boot systemd-cryptsetup cryptsetup
 
     notify "install more packages"
     apt install -y tasksel network-manager sudo
-    apt install -y -t ${BACKPORTS_VERSION} btrfs-progs btrfsmaintenance
+    apt install -y -t "${p_backports_version}" btrfs-progs btrfsmaintenance
 
     bootctl install
 
@@ -355,10 +359,10 @@ function target_code()
     echo 'add_dracutmodules+=" systemd btrfs "' > /etc/dracut.conf.d/89-btrfs.conf
     # not needed, firstboot sets kernel params and takes precedence
     # echo "kernel_cmdline=\"${g_kernel_params}\"" >> /etc/dracut.conf.d/89-btrfs.conf
-    if [ "${USE_LUKS}" = "true" ]; then
+    if [ "${p_use_luks}" = "true" ]; then
         echo 'add_dracutmodules+=" crypt "' > /etc/dracut.conf.d/90-luks.conf
 
-        if [ "${USE_TPM_TO_UNLOCK_LUKS}" = "true" ]; then
+        if [ "${p_use_tpm_to_unlock_luks}" = "true" ]; then
             apt install -y tpm2-tools
 
             check_tpm
@@ -378,11 +382,11 @@ function target_code()
 
                 notify "adding tpm key to luks"
 
-                printf '%s' "$LUKS_PASSWORD" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
+                printf '%s' "$p_luks_password" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
 
                 notify "enrolling luks key in tpm"
 
-                systemd-cryptenroll --unlock-key-file=${tmp_key_file} --tpm2-device=auto ${LUKS_ROOT_PARTITION} --tpm2-pcrs="7+14"
+                systemd-cryptenroll --unlock-key-file="${tmp_key_file}" --tpm2-device=auto "${LUKS_ROOT_PARTITION}" --tpm2-pcrs="7+14"
 
                 # If we reach here, all operations succeeded; securely delete the file
                 shred -u "$tmp_key_file"
@@ -406,31 +410,31 @@ function target_code()
 #    systemctl disable systemd-networkd.socket
 #    systemctl disable systemd-networkd-wait-online.service
 
-#    if [ ! -z "${NVIDIA_PACKAGE}" ]; then
+#    if [ ! -z "${p_nvidia_package}" ]; then
 #      # TODO the debian page says to do this instead:
 #      # echo "options nvidia-drm modeset=1" >> /etc/modprobe.d/nvidia-options.conf
 #      # g_kernel_params="${g_kernel_params} nvidia-drm.modeset=1"
 #    fi
 
-#    if [ "$ENABLE_POPCON" = true ] ; then
+#    if [ "$p_enable_popcon" = true ] ; then
 #        notify enabling popularity-contest
 #        echo "popularity-contest      popularity-contest/participate  boolean true" | debconf-set-selections
 #        apt install -y popularity-contest
 #    fi
 
-#    if [ ! -z "${SSH_PUBLIC_KEY}" ]; then
+#    if [ ! -z "${p_ssh_public_key}" ]; then
 #        notify adding ssh public key to user and root authorized_keys file
 #        mkdir -p /root/.ssh
 #        chmod 700 /root/.ssh
-#        echo "${SSH_PUBLIC_KEY}" > /root/.ssh/authorized_keys
+#        echo "${p_ssh_public_key}" > /root/.ssh/authorized_keys
 #        chmod 600 /root/.ssh/authorized_keys
 #
-#        if [ ! -z "${USERNAME}" ]; then
-#            mkdir -p /home/${USERNAME}/.ssh
-#            chmod 700 /home/${USERNAME}/.ssh
-#            echo "${SSH_PUBLIC_KEY}" > ${TARGET}/home/${USERNAME}/.ssh/authorized_keys
-#            chmod 600 /home/${USERNAME}/.ssh/authorized_keys
-#            chown -R ${USERNAME} /home/${USERNAME}/.ssh
+#        if [ ! -z "${p_username}" ]; then
+#            mkdir -p /home/${p_username}/.ssh
+#            chmod 700 /home/${p_username}/.ssh
+#            echo "${p_ssh_public_key}" > ${p_target}/home/${p_username}/.ssh/authorized_keys
+#            chmod 600 /home/${p_username}/.ssh/authorized_keys
+#            chown -R ${p_username} /home/${p_username}/.ssh
 #        fi
 #
 #        notify installing openssh-server
@@ -443,12 +447,13 @@ function target_code()
 #        tasksel
 #    fi
 
-#    if [ ! -z "${NVIDIA_PACKAGE}" ]; then
-#        notify installing ${NVIDIA_PACKAGE}
+#    if [ ! -z "${p_nvidia_package}" ]; then
+#        notify installing ${p_nvidia_package}
 #        # XXX dracut-install: ERROR: installing nvidia-blacklists-nouveau.conf nvidia.conf
-#        echo 'install_items+=" /etc/modprobe.d/nvidia-blacklists-nouveau.conf /etc/modprobe.d/nvidia.conf /etc/modprobe.d/nvidia-options.conf "' > ${TARGET}/etc/dracut.conf.d/10-nvidia.conf
-#        chroot ${TARGET}/ apt install -t ${BACKPORTS_VERSION} -y "${NVIDIA_PACKAGE}" nvidia-driver-libs:i386 linux-headers-amd64
+#        echo 'install_items+=" /etc/modprobe.d/nvidia-blacklists-nouveau.conf /etc/modprobe.d/nvidia.conf /etc/modprobe.d/nvidia-options.conf "' > ${p_target}/etc/dracut.conf.d/10-nvidia.conf
+#        chroot ${p_target}/ apt install -t ${p_backports_version} -y "${p_nvidia_package}" nvidia-driver-libs:i386 linux-headers-amd64
 #    fi
+    notify "done"
 }
 
 
@@ -456,63 +461,87 @@ function host_cleanup()
 {
     notify "cleaning up: umounting all filesystems"
 
-    umount ${TARGET}/boot/efi
-    umount -R ${TARGET}
+    umount "${p_target}"/boot/efi
+    umount -R "${p_target}"
 
-    if [ "${USE_LUKS}" = "true" ]; then
+    if [ "${p_use_luks}" = "true" ]; then
         notify closing luks
-        cryptsetup luksClose ${g_luks_root_device}
+        cryptsetup luksClose "${g_luks_root_device}"
     fi
 }
 
 
-if [ "$1" = "host" ]; then
+
+
+function host_code
+{
     setup_host
-    prepare_installation_disk ${DISK}
-    setup_system_partition ${DISK}
-    setup_root_partition ${DISK}
-    setup_luks ${g_root_partition_uuid}
+    prepare_installation_disk "${p_disk}"
+    setup_system_partition "${p_disk}"
+    setup_root_partition "${p_disk}"
+    setup_luks "${g_root_partition_uuid}"
     setup_btrfs ${g_root_partition}
-    mount_system_partition ${g_efi_system_partition_uuid}
+    mount_system_partition "${g_efi_system_partition_uuid}"
 
     do_debootstrap
     setup_fstab
     setup_sources_list
+
     setup_firstboot
 
+    params_for_target=$(set | grep '^p_.*=')
+
     systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
-                    --bind=${DISK} \
+                    --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
                     --bind=/dev/tpm0 \
                     --bind=/dev/tpmrm0 \
                     --bind=/sys/class/tpm \
-                    --bind=$(realpath ${g_luks_root_partition})  \
-                    --setenv=LUKS_ROOT_PARTITION=$(realpath ${g_luks_root_partition}) \
-                    --directory=${TARGET}\
-                    -- /my_installer.sh target
+                    --bind="$(realpath "${g_luks_root_partition}")" \
+                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+                    --directory="${p_target}"\
+                    -- /my_installer.sh target "$params_for_target"
 
     systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
                     --bind=/dev/tpm0 \
                     --bind=/dev/tpmrm0 \
                     --bind=/sys/class/tpm \
-                    --bind=$(realpath ${g_luks_root_partition})  \
-                    --setenv=LUKS_ROOT_PARTITION=$(realpath ${g_luks_root_partition}) \
-                    --machine=${HOSTNAME} \
-                    --bind=${DISK} \
+                    --bind="$(realpath "${g_luks_root_partition}")"  \
+                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+                    --machine="${p_hostname}" \
+                    --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
-                    --directory=${TARGET}
+                    --directory="${p_target}"
 
 
     notify "INSTALLATION FINISHED"
+}
+
+
+
+notify "Starting"
+
+if [ $# -lt 1 ]; then
+    echo "Error: Code side argument required. Use host or target"
+    exit 1
+fi
+
+if [[ "$1" != "host" && "$1" != "target" ]]; then
+    echo "Error: First argument must be 'host' or 'target', got '$1'"
+    exit 1
+fi
+
+if [ "$1" = "host" ]; then
+    get_parameters "$@"
+    host_code
 fi
 
 # has to be "target" not just different than "host"
 if [ "$1" = "target" ]; then
+
+    echo "${@:2}"
+    
+    eval "${@:2}"
     target_code
 fi
-
-#if [ ! -z "${AFTER_INSTALLED_CMD}" ]; then
-#  notify running ${AFTER_INSTALLED_CMD}
-#  sh -c "${AFTER_INSTALLED_CMD}"
-#fi
 
