@@ -52,9 +52,6 @@ function get_parameters()
     readonly p_luks_password=$LUKS_PASSWORD
     readonly p_use_tpm_to_unlock_luks=$USE_TPM_TO_UNLOCK_LUKS
 
-    readonly p_btrfs_fsflags=$BTRFS_FSFLAGS
-    readonly p_btrfs_admin_mount=$BTRFS_ADMIN_MOUNT
-
     #readonly p_enable_popcon=$ENABLE_POPCON
 
     #readonly p_nvidia_package=$NVIDIA_PACKAGE
@@ -82,7 +79,9 @@ function setup_host()
 {
     notify "install required packages"
     apt update -y
-    apt install -y cryptsetup debootstrap uuid-runtime btrfs-progs dosfstools pv gdisk parted systemd-container systemd-cryptsetup tpm2-tools tpm-udev
+    apt install -yqq cryptsetup debootstrap uuid-runtime btrfs-progs dosfstools \
+                     pv gdisk parted systemd-container systemd-cryptsetup tpm2-tools tpm-udev \
+                     xfsprogs
     # check the host capabilities
     # TPM
 
@@ -205,58 +204,61 @@ function setup_luks()
 
 function setup_btrfs()
 {
+    local btrfs_fsflags="compress=zstd:1"
+
     local btrfs_root_partition=$1
+
+    wipefs -a "${btrfs_root_partition}"
 
     local btrfs_uuid; btrfs_uuid=$(uuidgen)
     notify "create root filesystem on ${btrfs_root_partition}"
     mkfs.btrfs -U "${btrfs_uuid}" "${btrfs_root_partition}"
 
-    notify "mount btrfs admin subvolume on ${p_btrfs_admin_mount}"
-    mkdir -p "${p_btrfs_admin_mount}"
-    mount "${btrfs_root_partition}" "${p_btrfs_admin_mount}" -o rw,"${p_btrfs_fsflags}",subvolid=5,skip_balance
+    local btrfs_admin_mount=/mnt/btrfs_admin_mount
 
-    notify "create @ subvolume on ${p_btrfs_admin_mount}"
-    btrfs subvolume create "${p_btrfs_admin_mount}"/@
+    notify "mount btrfs admin subvolume on ${btrfs_admin_mount}"
+    mkdir -p "${btrfs_admin_mount}"
+    mount "${btrfs_root_partition}" "${btrfs_admin_mount}" -o rw,"${btrfs_fsflags}",subvolid=5,skip_balance
 
-    notify "create @home subvolume on ${p_btrfs_admin_mount}"
-    btrfs subvolume create "${p_btrfs_admin_mount}"/@home
+    notify "create @ subvolume on ${btrfs_admin_mount}"
+    btrfs subvolume create "${btrfs_admin_mount}"/@
 
-    notify "create @swap subvolume for swap file on ${p_btrfs_admin_mount}"
-    btrfs subvolume create "${p_btrfs_admin_mount}"/@swap
-    chmod 700 "${p_btrfs_admin_mount}"/@swap
+    notify "create @home subvolume on ${btrfs_admin_mount}"
+    btrfs subvolume create "${btrfs_admin_mount}"/@home
+
+    notify "create @swap subvolume for swap file on ${btrfs_admin_mount}"
+    btrfs subvolume create "${btrfs_admin_mount}"/@swap
+    chmod 700 "${btrfs_admin_mount}"/@swap
 
     notify "mount root and home subvolume on ${p_target}"
     mkdir -p "${p_target}"
-    mount "${btrfs_root_partition}" "${p_target}" -o "${p_btrfs_fsflags}",subvol=@
+    mount "${btrfs_root_partition}" "${p_target}" -o "${btrfs_fsflags}",subvol=@
     mkdir -p "${p_target}"/home
-    mount "${btrfs_root_partition}" "${p_target}"/home -o "${p_btrfs_fsflags}",subvol=@home
+    mount "${btrfs_root_partition}" "${p_target}"/home -o "${btrfs_fsflags}",subvol=@home
 
     notify "mount swap subvolume on ${p_target}"
     mkdir -p "${p_target}"/swap
     mount "${btrfs_root_partition}" "${p_target}"/swap -o noatime,subvol=@swap
 
     notify "make swap file at ${p_target}/swap/swapfile"
-    btrfs filesystem mkswapfile --size ${g_swap_size}G "${p_target}"/swap/swapfile
-
-    # this would let host kernel use the swap file on the ${p_target}, we don't want that
-    # swapon ${p_target}/swap/swapfile
+    btrfs filesystem mkswapfile --size "${g_swap_size}"G "${p_target}"/swap/swapfile
 
     notify "cleanup administrative mount"
-    umount "${p_btrfs_admin_mount}"
-    rmdir "${p_btrfs_admin_mount}"
+    umount "${btrfs_admin_mount}"
+    rmdir "${btrfs_admin_mount}"
 
     swapfile_offset=$(btrfs inspect-internal map-swapfile -r "${p_target}"/swap/swapfile)
 
-    g_kernel_params="${g_kernel_params} rootfstype=btrfs rootflags=${p_btrfs_fsflags},subvol=@ resume=${btrfs_root_partition} resume_offset=${swapfile_offset}"
+    g_kernel_params="${g_kernel_params} rootfstype=btrfs rootflags=${btrfs_fsflags},subvol=@ resume=${btrfs_root_partition} resume_offset=${swapfile_offset}"
 
     # this should go with dracut, but not a biggie
     g_kernel_params="${g_kernel_params} rd.auto=1"
 
-    g_fstab_content+="UUID=${btrfs_uuid} / btrfs defaults,subvol=@,${p_btrfs_fsflags} 0 1"
+    g_fstab_content+="UUID=${btrfs_uuid} / btrfs defaults,subvol=@,${btrfs_fsflags} 0 1"
     g_fstab_content+=$'\n'
-    g_fstab_content+="UUID=${btrfs_uuid} /home btrfs defaults,subvol=@home,${p_btrfs_fsflags} 0 1"
+    g_fstab_content+="UUID=${btrfs_uuid} /home btrfs defaults,subvol=@home,${btrfs_fsflags} 0 1"
     g_fstab_content+=$'\n'
-    g_fstab_content+="UUID=${btrfs_uuid} /swap btrfs defaults,subvol=@swap,noatime,${p_btrfs_fsflags} 0 0"
+    g_fstab_content+="UUID=${btrfs_uuid} /swap btrfs defaults,subvol=@swap,noatime,${btrfs_fsflags} 0 0"
     g_fstab_content+=$'\n'
     g_fstab_content+="/swap/swapfile none swap defaults 0 0"
     g_fstab_content+=$'\n'
@@ -265,11 +267,97 @@ function setup_btrfs()
     # g_btrfs_uuid=${btrfs_uuid}
 }
 
+function setup_ext4()
+{
+    local ext4_root_partition=$1
+
+    wipefs -a "${ext4_root_partition}"
+
+    local ext4_uuid; ext4_uuid=$(uuidgen)
+    notify "create root filesystem on ${ext4_root_partition}"
+    mkfs.ext4 -U "${ext4_uuid}" "${ext4_root_partition}"
+
+    notify "mount ext4 root partition on ${p_target}"
+    mkdir -p "${p_target}"
+    mount "${ext4_root_partition}" "${p_target}"
+
+    notify "create home directory"
+    mkdir -p "${p_target}"/home
+
+    notify "create swap directory"
+    mkdir -p "${p_target}"/swap
+    chmod 700 "${p_target}"/swap
+
+    notify "make swap file at ${p_target}/swap/swapfile"
+    fallocate -l "${g_swap_size}G" "${p_target}/swap/swapfile"
+
+    chmod 600 "${p_target}"/swap/swapfile
+    mkswap "${p_target}"/swap/swapfile
+
+    # Get swap file offset for resume
+    swapfile_offset=$(filefrag -v "${p_target}"/swap/swapfile | awk 'NR==4{print $4}' | sed 's/\.\.//')
+
+    g_kernel_params="${g_kernel_params} rootfstype=ext4 root=${ext4_root_partition} resume=${ext4_root_partition} resume_offset=${swapfile_offset}"
+
+    # this should go with dracut, but not a biggie
+    g_kernel_params="${g_kernel_params} rd.auto=1"
+
+    g_fstab_content+="UUID=${ext4_uuid} / ext4 defaults 0 1"
+    g_fstab_content+=$'\n'
+    g_fstab_content+="/swap/swapfile none swap defaults 0 0"
+    g_fstab_content+=$'\n'
+
+    # return ext4_uuid
+    # g_ext4_uuid=${ext4_uuid}
+}
+
+function setup_xfs()
+{
+    local xfs_root_partition=$1
+
+    wipefs -a "${xfs_root_partition}"
+
+    local xfs_uuid; xfs_uuid=$(uuidgen)
+    notify "create root filesystem on ${xfs_root_partition}"
+    mkfs.xfs -m uuid="${xfs_uuid}" "${xfs_root_partition}"
+
+    notify "mount xfs root partition on ${p_target}"
+    mkdir -p "${p_target}"
+    mount "${xfs_root_partition}" "${p_target}"
+
+    notify "create home directory"
+    mkdir -p "${p_target}"/home
+
+    notify "create swap directory"
+    mkdir -p "${p_target}"/swap
+    chmod 700 "${p_target}"/swap
+
+    notify "make swap file at ${p_target}/swap/swapfile"
+    fallocate -l "${g_swap_size}G" "${p_target}/swap/swapfile"
+    chmod 600 "${p_target}"/swap/swapfile
+    mkswap "${p_target}"/swap/swapfile
+
+    # Get swap file offset for resume
+    swapfile_offset=$(filefrag -v "${p_target}"/swap/swapfile | awk 'NR==4{print $4}' | sed 's/\.\.//')
+
+    g_kernel_params="${g_kernel_params} rootfstype=xfs root=${xfs_root_partition} resume=${xfs_root_partition} resume_offset=${swapfile_offset}"
+
+    # this should go with dracut, but not a biggie
+    g_kernel_params="${g_kernel_params} rd.auto=1"
+
+    g_fstab_content+="UUID=${xfs_uuid} / xfs defaults 0 1"
+    g_fstab_content+=$'\n'
+    g_fstab_content+="/swap/swapfile none swap defaults 0 0"
+    g_fstab_content+=$'\n'
+
+    # return xfs_uuid
+    # g_xfs_uuid=${xfs_uuid}
+}
 
 function do_debootstrap()
 {
     notify "install debian on ${p_target}"
-    debootstrap --include=locales "${p_debian_version}" "${p_target}" http://deb.debian.org/debian
+    debootstrap --include=locales "${p_debian_version}" "${p_target}" http://deb.debian.org/debian 
 }
 
 setup_fstab()
@@ -327,80 +415,127 @@ function target_code()
     notify "generating locales"
     locale-gen
 
-    notify "set up user ${p_username} user"
+    notify "set up user ${p_username}"
     adduser --disabled-password --gecos "${p_user_full_name}" "${p_username}"
     adduser "${p_username}" sudo
     echo "${p_username}":"${p_user_password}" | chpasswd
 
+    apt update -yq
+
     notify "install standard packages"
-    apt update -y
-    apt install -y dctrl-tools
+    apt install -yqq dctrl-tools
     standard_packages=$(echo "$(grep-dctrl -n -s Package -F Priority standard /var/lib/apt/lists/*_Packages)" | xargs)
- 
-    echo apt install -y "$standard_packages"
-
-    notify "install kernel and related packages"
-    apt-cache policy linux-image-amd64
-    apt-mark showhold
-
-    apt install -y -t "${p_backports_version}" linux-image-amd64 firmware-linux plymouth-theme-hamara dracut
-    apt full-upgrade -t "${p_debian_version}"-security -y
-
-    notify "install systemd packages"
-    apt install -y -t "${p_backports_version}" systemd systemd-boot systemd-cryptsetup cryptsetup
+    echo apt install -yqq "$standard_packages"
 
     notify "install more packages"
-    apt install -y tasksel network-manager sudo
-    apt install -y -t "${p_backports_version}" btrfs-progs btrfsmaintenance
+    apt install -yqq tasksel network-manager sudo 
+    apt install -yqq ssh sshfs zsh git curl lz4 file
 
-    bootctl install
+    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+    sed -i 's/ZSH_THEME=".*"/ZSH_THEME="risto"/' ~/.zshrc
+    chsh -s "$(which zsh)"
 
-    notify "configuring dracut"
-    echo 'add_dracutmodules+=" systemd btrfs "' > /etc/dracut.conf.d/89-btrfs.conf
-    # not needed, firstboot sets kernel params and takes precedence
-    # echo "kernel_cmdline=\"${g_kernel_params}\"" >> /etc/dracut.conf.d/89-btrfs.conf
-    if [ "${p_use_luks}" = "true" ]; then
-        echo 'add_dracutmodules+=" crypt "' > /etc/dracut.conf.d/90-luks.conf
+    chsh -s "$(which zsh)" "${p_username}"
+    # shellcheck disable=SC2016
+    su - "${p_username}" -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended'
+    su - "${p_username}" -c 'sed -i "s/ZSH_THEME=\".*\"/ZSH_THEME=\"risto\"/" ~/.zshrc'
 
-        if [ "${p_use_tpm_to_unlock_luks}" = "true" ]; then
-            apt install -y tpm2-tools
-
-            check_tpm
-
-            if [ "${g_tpm_available}" = "true" ]; then
-
-                notify "creating luks key for tpm enrollment"
-
-                # Create a secure temporary file
-                tmp_key_file=$(mktemp /tmp/safe.XXXXXX)
-
-                # Set restrictive permissions (optional, but recommended for sensitive data)
-                chmod 600 "$tmp_key_file"
-
-                # Write random data to the temporary file
-                dd if=/dev/random of="$tmp_key_file" bs=512 count=1 status=none
-
-                notify "adding tpm key to luks"
-
-                printf '%s' "$p_luks_password" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
-
-                notify "enrolling luks key in tpm"
-
-                systemd-cryptenroll --unlock-key-file="${tmp_key_file}" --tpm2-device=auto "${LUKS_ROOT_PARTITION}" --tpm2-pcrs="7+14"
-
-                # If we reach here, all operations succeeded; securely delete the file
-                shred -u "$tmp_key_file"
-
-                sudo sed -i 's/$/ rd.luks.options=tpm2-device=auto/' /etc/kernel/cmdline
-
-                echo 'add_dracutmodules+=" tpm2-tss "' > /etc/dracut.conf.d/90-tpm.conf
-            fi
-        fi
-    fi
+    # filesystem support
+    apt install -yqq -t "${p_backports_version}" xfsprogs e2fsprogs btrfs-progs btrfsmaintenance
 
     notify "removing unused packages"
 
-    apt autoremove -y
+    apt autoremove -y --purge
+
+    notify "install kernel, dracut, systemd and related packages"
+    apt-cache policy linux-image-amd64
+    apt-mark showhold
+
+    # Enable UKI generation
+    mkdir -p /etc/kernel
+    printf "%s\n%s\n%s\n" "layout=uki"  "initrd_generator=dracut" "uki_generator=ukify"  > /etc/kernel/install.conf 
+
+
+    # configure dracut
+    mkdir -p /etc/dracut.conf.d/
+    echo 'stdloglvl="5"'   > /etc/dracut.conf.d/dracut.conf
+    echo 'compress="cat"' >> /etc/dracut.conf.d/dracut.conf
+    echo 'add_dracutmodules+=" systemd resume "' >> dracut.conf
+    echo 'uefi="no"' >> /etc/dracut.conf.d/dracut.conf
+    echo 'hostonly="no"' >> /etc/dracut.conf.d/dracut.conf
+    echo 'add_dracutmodules+=" plymouth "' >> /etc/dracut.conf.d/90-tpm.conf
+
+    # temporary fix while waiting for #1095646 to be resolved
+    ln -s /dev/null /etc/kernel/install.d/50-dracut.install
+
+    apt install -yqq -t "${p_backports_version}" \
+        linux-image-amd64 firmware-linux \
+        dracut efibootmgr sbsigntool \
+        plymouth plymouth-themes \
+        systemd systemd-boot systemd-cryptsetup cryptsetup systemd-boot-efi systemd-ukify python3-pefile
+
+    # plymouth-theme-hamara 
+    plymouth-set-default-theme solar
+
+    apt full-upgrade -t "${p_debian_version}"-security -yq
+
+    notify "updating initrd for all kernels"
+    dpkg -l 'linux-image-[0-9]*' | awk '/^ii/ {print $2}' | xargs dpkg-reconfigure
+
+    bootctl install
+
+
+
+
+    # !!!!
+    # !!!! echo 'add_dracutmodules+=" systemd resume btrfs "' > /etc/dracut.conf.d/89-btrfs.conf
+    # not needed, firstboot sets kernel params and takes precedence
+
+    # echo "kernel_cmdline=\"${g_kernel_params}\"" >> /etc/dracut.conf.d/kcmd.conf
+
+    #apt install -yqq tpm2-tools
+
+    #echo 'add_dracutmodules+=" tpm2-tss "' >> /etc/dracut.conf.d/90-tpm.conf
+    #echo 'add_dracutmodules+=" crypt "' > /etc/dracut.conf.d/90-luks.conf
+
+
+    apt autoremove -y --purge
+
+    # if [ "${p_use_luks}" = "qtrue" ]; then
+
+    #     if [ "${p_use_tpm_to_unlock_luks}" = "true" ]; then
+
+    #         check_tpm
+
+    #         if [ "${g_tpm_available}" = "true" ]; then
+
+    #             sed -i 's/$/ rd.luks.options=tpm2-device=auto/' /etc/kernel/cmdline
+
+    #             notify "creating luks key for tpm enrollment"
+
+    #             # Create a secure temporary file
+    #             tmp_key_file=$(mktemp /tmp/safe.XXXXXX)
+
+    #             # Set restrictive permissions (optional, but recommended for sensitive data)
+    #             chmod 600 "$tmp_key_file"
+
+    #             # Write random data to the temporary file
+    #             dd if=/dev/random of="$tmp_key_file" bs=512 count=1 status=none
+
+    #             notify "adding tpm key to luks"
+
+    #             printf '%s' "$p_luks_password" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
+
+    #             notify "enrolling luks key in tpm"
+
+    #             systemd-cryptenroll --unlock-key-file="${tmp_key_file}" --tpm2-device=auto "${LUKS_ROOT_PARTITION}" --tpm2-pcrs="7+14"
+
+    #             # If we reach here, all operations succeeded; securely delete the file
+    #             shred -u "$tmp_key_file"
+
+    #         fi
+    #     fi
+    # fi
 
     #bootctl update
 
@@ -419,7 +554,7 @@ function target_code()
 #    if [ "$p_enable_popcon" = true ] ; then
 #        notify enabling popularity-contest
 #        echo "popularity-contest      popularity-contest/participate  boolean true" | debconf-set-selections
-#        apt install -y popularity-contest
+#        apt install -yqq popularity-contest
 #    fi
 
 #    if [ ! -z "${p_ssh_public_key}" ]; then
@@ -438,7 +573,7 @@ function target_code()
 #        fi
 #
 #        notify installing openssh-server
-#        apt install -y openssh-server
+#        apt install -yqq openssh-server
 #    fi
 
 #    if [ -z "${NON_INTERACTIVE}" ]; then
@@ -479,40 +614,49 @@ function host_code
     prepare_installation_disk "${p_disk}"
     setup_system_partition "${p_disk}"
     setup_root_partition "${p_disk}"
-    setup_luks "${g_root_partition_uuid}"
-    setup_btrfs ${g_root_partition}
+    #setup_luks "${g_root_partition_uuid}"
+    #setup_btrfs ${g_root_partition}
+    setup_ext4 ${g_root_partition}
+    #setup_xfs ${g_root_partition}
     mount_system_partition "${g_efi_system_partition_uuid}"
 
     do_debootstrap
     setup_fstab
+
+
+
     setup_sources_list
 
     setup_firstboot
 
-    params_for_target=$(set | grep '^p_.*=')
-
-    systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
-                    --bind="${p_disk}" \
-                    --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
-                    --bind=/dev/tpm0 \
-                    --bind=/dev/tpmrm0 \
-                    --bind=/sys/class/tpm \
-                    --bind="$(realpath "${g_luks_root_partition}")" \
-                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
-                    --directory="${p_target}"\
-                    -- /my_installer.sh target "$params_for_target"
-
-    systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
-                    --bind=/dev/tpm0 \
-                    --bind=/dev/tpmrm0 \
-                    --bind=/sys/class/tpm \
-                    --bind="$(realpath "${g_luks_root_partition}")"  \
-                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+    params_for_target=$(set | grep -E '^(p_|g_).*=')
+#                    --bind=/dev/mapper \
+                #    --bind=/dev/tpm0 \
+                #     --bind=/dev/tpmrm0 \
+                #     --bind=/sys/class/tpm \
+                #     --bind="$(realpath "${g_luks_root_partition}")" \
+                #     --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+     systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
                     --machine="${p_hostname}" \
                     --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
-                    --directory="${p_target}"
+                    --directory="${p_target}"\
+                    -- /my_installer.sh target "$params_for_target"
 
+                    # --bind=/dev/mapper \
+                    # --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+                    # --bind="$(realpath "${g_luks_root_partition}")"  \
+                    # --bind=/dev/tpm0 \
+                    # --bind=/dev/tpmrm0 \
+                    # --bind=/sys/class/tpm \
+ 
+    systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
+                    --machine="${p_hostname}" \
+                    --bind="${p_disk}" \
+                    --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
+                    --directory="${p_target}" 
+
+    host_cleanup
 
     notify "INSTALLATION FINISHED"
 }
@@ -522,26 +666,12 @@ function host_code
 notify "Starting"
 
 if [ $# -lt 1 ]; then
-    echo "Error: Code side argument required. Use host or target"
-    exit 1
-fi
-
-if [[ "$1" != "host" && "$1" != "target" ]]; then
-    echo "Error: First argument must be 'host' or 'target', got '$1'"
-    exit 1
-fi
-
-if [ "$1" = "host" ]; then
     get_parameters "$@"
     host_code
-fi
-
-# has to be "target" not just different than "host"
-if [ "$1" = "target" ]; then
-
-    echo "${@:2}"
-    
-    eval "${@:2}"
-    target_code
+else
+    if [ "$1" = "target" ]; then
+        eval "${@:2}"
+        target_code
+    fi
 fi
 
