@@ -13,11 +13,13 @@
 
 set -euo pipefail
 
-g_kernel_params="rw quiet splash"
+# bug #1108404 forces us to use SYSTEMD_SULOGIN_FORCE=1 
+#g_kernel_params="rw quiet splash"
+g_kernel_params="rw SYSTEMD_SULOGIN_FORCE=1 rd.shell"
 g_fstab_content=""
 # g_tpm_available
 # g_swap_size
-g_luks_root_partition=
+# g_luks_root_partition=
 
 function get_parameters()
 {
@@ -27,8 +29,8 @@ function get_parameters()
 
     eval "${@:2}"
 
-    if [ -f my_installer_params.sh ]; then
-        source my_installer_params.sh
+    if [ -f dr_params.sh ]; then
+        source dr_params.sh
     fi
 
     readonly p_disk=$DISK
@@ -46,7 +48,7 @@ function get_parameters()
     readonly p_hostname=$HOSTNAME
     readonly p_backports_version=$BACKPORTS_VERSION
 
-    #readonly p_root_password=$ROOT_PASSWORD
+    readonly p_root_password=$ROOT_PASSWORD
 
     readonly p_use_luks=$USE_LUKS
     readonly p_luks_password=$LUKS_PASSWORD
@@ -191,13 +193,17 @@ function setup_luks()
     # password is always present
     #echo -n "${p_luks_password}" | cryptsetup luksFormat ${root_partition} --type luks2 --key-file=-
     printf '%s' "$p_luks_password" | cryptsetup luksFormat "$root_partition" --type luks2 --batch-mode --key-file -
+	
+	luks_uuid=$(cryptsetup luksUUID "${root_partition}")
 
-    notify "open luks on root"
-    printf '%s' "$p_luks_password" | cryptsetup luksOpen "$root_partition" root --key-file -
+    notify "open luks on cryptoroot, with uuid $luks_uuid"
+    printf '%s' "$p_luks_password" | cryptsetup luksOpen "$root_partition" cryptoroot --key-file -
+
+    g_kernel_params="${g_kernel_params} rd.luks.name=${luks_uuid}=cryptoroot"
 
     # return luks_root_partition
-    g_luks_root_device=/dev/mapper/root
-    g_luks_root_partition=${root_partition}
+    g_luks_root_device=/dev/mapper/cryptoroot
+    #g_luks_root_partition=${root_partition}
     g_root_partition=${g_luks_root_device}
 }
 
@@ -297,7 +303,8 @@ function setup_ext4()
     # Get swap file offset for resume
     swapfile_offset=$(filefrag -v "${p_target}"/swap/swapfile | awk 'NR==4{print $4}' | sed 's/\.\.//')
 
-    g_kernel_params="${g_kernel_params} rootfstype=ext4 root=${ext4_root_partition} resume=${ext4_root_partition} resume_offset=${swapfile_offset}"
+#    g_kernel_params="${g_kernel_params} rootfstype=ext4 root=${ext4_root_partition} resume=${ext4_root_partition} resume_offset=${swapfile_offset}"
+    g_kernel_params="${g_kernel_params} rootfstype=ext4 root=${ext4_root_partition}"
 
     # this should go with dracut, but not a biggie
     g_kernel_params="${g_kernel_params} rd.auto=1"
@@ -340,10 +347,8 @@ function setup_xfs()
     # Get swap file offset for resume
     swapfile_offset=$(filefrag -v "${p_target}"/swap/swapfile | awk 'NR==4{print $4}' | sed 's/\.\.//')
 
-    g_kernel_params="${g_kernel_params} rootfstype=xfs root=${xfs_root_partition} resume=${xfs_root_partition} resume_offset=${swapfile_offset}"
-
-    # this should go with dracut, but not a biggie
-    g_kernel_params="${g_kernel_params} rd.auto=1"
+#    g_kernel_params="${g_kernel_params} rootfstype=xfs root=${xfs_root_partition} resume=${xfs_root_partition} resume_offset=${swapfile_offset}"
+    g_kernel_params="${g_kernel_params} rootfstype=xfs root=${xfs_root_partition}"
 
     g_fstab_content+="UUID=${xfs_uuid} / xfs defaults 0 1"
     g_fstab_content+=$'\n'
@@ -420,6 +425,8 @@ function target_code()
     adduser "${p_username}" sudo
     echo "${p_username}":"${p_user_password}" | chpasswd
 
+    echo root:"${p_root_password}" | chpasswd
+
     apt update -yq
 
     notify "install standard packages"
@@ -455,21 +462,21 @@ function target_code()
     mkdir -p /etc/kernel
     printf "%s\n%s\n%s\n" "layout=uki"  "initrd_generator=dracut" "uki_generator=ukify"  > /etc/kernel/install.conf 
 
-
     # configure dracut
     mkdir -p /etc/dracut.conf.d/
-    echo 'stdloglvl="5"'   > /etc/dracut.conf.d/dracut.conf
+    echo 'stdloglvl="3"'   > /etc/dracut.conf.d/dracut.conf
     echo 'compress="cat"' >> /etc/dracut.conf.d/dracut.conf
-    echo 'add_dracutmodules+=" systemd resume "' >> dracut.conf
+    echo 'add_dracutmodules+=" bash sh zsh busybox ext4 xfs btrfs base systemd crypt "' >> dracut.conf
     echo 'uefi="no"' >> /etc/dracut.conf.d/dracut.conf
     echo 'hostonly="no"' >> /etc/dracut.conf.d/dracut.conf
-    echo 'add_dracutmodules+=" plymouth "' >> /etc/dracut.conf.d/90-tpm.conf
+    echo 'add_dracutmodules+=" plymouth "' >> /etc/dracut.conf.d/dracut.conf
 
     # temporary fix while waiting for #1095646 to be resolved
     ln -s /dev/null /etc/kernel/install.d/50-dracut.install
 
+        # firmware-linux \
     apt install -yqq -t "${p_backports_version}" \
-        linux-image-amd64 firmware-linux \
+        linux-image-amd64  \
         dracut efibootmgr sbsigntool \
         plymouth plymouth-themes \
         systemd systemd-boot systemd-cryptsetup cryptsetup systemd-boot-efi systemd-ukify python3-pefile
@@ -478,12 +485,6 @@ function target_code()
     plymouth-set-default-theme solar
 
     apt full-upgrade -t "${p_debian_version}"-security -yq
-
-    notify "updating initrd for all kernels"
-    dpkg -l 'linux-image-[0-9]*' | awk '/^ii/ {print $2}' | xargs dpkg-reconfigure
-
-    bootctl install
-
 
 
 
