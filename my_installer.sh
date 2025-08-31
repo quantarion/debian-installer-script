@@ -14,12 +14,14 @@
 set -euo pipefail
 
 # bug #1108404 forces us to use SYSTEMD_SULOGIN_FORCE=1 
-#g_kernel_params="rw quiet splash"
-g_kernel_params="rw SYSTEMD_SULOGIN_FORCE=1 rd.shell"
+g_kernel_params="rw quiet splash"
+#g_kernel_params="rw SYSTEMD_SULOGIN_FORCE=1 rd.debug rd.shell rd.break=pre-mount rd.udev.log_level=debug"
+
+
 g_fstab_content=""
 # g_tpm_available
 # g_swap_size
-# g_luks_root_partition=
+g_luks_root_partition=
 
 function get_parameters()
 {
@@ -199,11 +201,11 @@ function setup_luks()
     notify "open luks on cryptoroot, with uuid $luks_uuid"
     printf '%s' "$p_luks_password" | cryptsetup luksOpen "$root_partition" cryptoroot --key-file -
 
-    g_kernel_params="${g_kernel_params} rd.luks.name=${luks_uuid}=cryptoroot"
+    g_kernel_params="${g_kernel_params} rd.luks.options=${luks_uuid}=tpm2-device=auto rd.luks.crypttab=no rd.luks.name=${luks_uuid}=cryptoroot"
 
     # return luks_root_partition
     g_luks_root_device=/dev/mapper/cryptoroot
-    #g_luks_root_partition=${root_partition}
+    g_luks_root_partition=${root_partition}
     g_root_partition=${g_luks_root_device}
 }
 
@@ -381,11 +383,11 @@ get_sources_list()
     echo "Components: main contrib non-free non-free-firmware"
     echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
     echo
-    echo "Types: deb"
-    echo "URIs: http://security.debian.org/debian-security/"
-    echo "Suites: ${p_debian_version}-security"
-    echo "Components: main contrib non-free non-free-firmware"
-    echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
+    # echo "Types: deb"
+    # echo "URIs: http://security.debian.org/debian-security/"
+    # echo "Suites: ${p_debian_version}-security"
+    # echo "Components: main contrib non-free non-free-firmware"
+    # echo "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg"
 }
 
 function setup_sources_list()
@@ -466,25 +468,38 @@ function target_code()
     mkdir -p /etc/dracut.conf.d/
     echo 'stdloglvl="3"'   > /etc/dracut.conf.d/dracut.conf
     echo 'compress="cat"' >> /etc/dracut.conf.d/dracut.conf
-    echo 'add_dracutmodules+=" bash sh zsh busybox ext4 xfs btrfs base systemd crypt "' >> dracut.conf
+    echo 'add_dracutmodules+=" bash sh zsh busybox ext4 xfs btrfs base "' >> dracut.conf
     echo 'uefi="no"' >> /etc/dracut.conf.d/dracut.conf
     echo 'hostonly="no"' >> /etc/dracut.conf.d/dracut.conf
-    echo 'add_dracutmodules+=" plymouth "' >> /etc/dracut.conf.d/dracut.conf
+    echo 'add_dracutmodules+=" crypt tpm2-tss systemd plymouth "' >> /etc/dracut.conf.d/dracut.conf
+#    echo 'add-drivers+=" tpm_tis"' >> /etc/dracut.conf.d/dracut.conf
+    echo 'add_dracutmodules+=" systemd systemd-sysusers crypt dm rootfs-block btrfs tpm2-tss "' >> /etc/dracut.conf.d/dracut.conf
+    echo 'install_items+=" /etc/passwd /etc/shadow /etc/group /etc/gshadow "' > /etc/dracut.conf.d/dracut.conf
+
+    # temporary fix while waiting for #1056665 / #1100919 to be resolved
+	mkdir -p /etc/sysusers.d/
+	echo 'u tss - "TPM2 Software Stack user" /var/lib/tpm' > /etc/sysusers.d/tpm2-tss.conf
+	echo 'g tss - "TPM2 Software Stack group"' >> /etc/sysusers.d/tpm2-tss.conf
+	echo 'u tss - "TPM2 Software Stack user" /var/lib/tpm' > /usr/lib/sysusers.d/tpm2-tss.conf
+	echo 'g tss - "TPM2 Software Stack group"' >> /usr/lib/sysusers.d/tpm2-tss.conf
+
+
 
     # temporary fix while waiting for #1095646 to be resolved
     ln -s /dev/null /etc/kernel/install.d/50-dracut.install
 
-        # firmware-linux \
-    apt install -yqq -t "${p_backports_version}" \
+    apt install -yqq --autoremove --purge -t "${p_backports_version}" \
+        firmware-linux \
         linux-image-amd64  \
-        dracut efibootmgr sbsigntool \
+        dracut efibootmgr sbsigntool tpm2-tools tpm-udev python3-pefile \
         plymouth plymouth-themes \
-        systemd systemd-boot systemd-cryptsetup cryptsetup systemd-boot-efi systemd-ukify python3-pefile
+        systemd systemd-boot systemd-cryptsetup cryptsetup systemd-boot-efi systemd-ukify
+
 
     # plymouth-theme-hamara 
     plymouth-set-default-theme solar
 
-    apt full-upgrade -t "${p_debian_version}"-security -yq
+    # apt full-upgrade -t "${p_debian_version}"-security -yq
 
 
 
@@ -499,44 +514,49 @@ function target_code()
     #echo 'add_dracutmodules+=" tpm2-tss "' >> /etc/dracut.conf.d/90-tpm.conf
     #echo 'add_dracutmodules+=" crypt "' > /etc/dracut.conf.d/90-luks.conf
 
-
     apt autoremove -y --purge
 
-    # if [ "${p_use_luks}" = "qtrue" ]; then
+	notify "tpm2 unlock setup"
 
-    #     if [ "${p_use_tpm_to_unlock_luks}" = "true" ]; then
+    if [ "${p_use_luks}" = "true" ]; then
 
-    #         check_tpm
+        if [ "${p_use_tpm_to_unlock_luks}" = "true" ]; then
 
-    #         if [ "${g_tpm_available}" = "true" ]; then
+            check_tpm
 
-    #             sed -i 's/$/ rd.luks.options=tpm2-device=auto/' /etc/kernel/cmdline
+            if [ "${g_tpm_available}" = "true" ]; then
 
-    #             notify "creating luks key for tpm enrollment"
+                #sed -i 's/$/ rd.luks.options=tpm2-device=auto/' /etc/kernel/cmdline
 
-    #             # Create a secure temporary file
-    #             tmp_key_file=$(mktemp /tmp/safe.XXXXXX)
+                notify "creating luks key for tpm enrollment"
 
-    #             # Set restrictive permissions (optional, but recommended for sensitive data)
-    #             chmod 600 "$tmp_key_file"
+                # Create a secure temporary file
+                tmp_key_file=$(mktemp /tmp/safe.XXXXXX)
 
-    #             # Write random data to the temporary file
-    #             dd if=/dev/random of="$tmp_key_file" bs=512 count=1 status=none
+                # Set restrictive permissions (optional, but recommended for sensitive data)
+                chmod 600 "$tmp_key_file"
 
-    #             notify "adding tpm key to luks"
+                # Write random data to the temporary file
+                dd if=/dev/random of="$tmp_key_file" bs=512 count=1 status=none
 
-    #             printf '%s' "$p_luks_password" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
+                notify "adding tpm key to luks"
 
-    #             notify "enrolling luks key in tpm"
+                printf '%s' "$p_luks_password" | cryptsetup luksAddKey --batch-mode --key-file - "$LUKS_ROOT_PARTITION" "${tmp_key_file}"
 
-    #             systemd-cryptenroll --unlock-key-file="${tmp_key_file}" --tpm2-device=auto "${LUKS_ROOT_PARTITION}" --tpm2-pcrs="7+14"
+                notify "enrolling luks key in tpm"
 
-    #             # If we reach here, all operations succeeded; securely delete the file
-    #             shred -u "$tmp_key_file"
+                systemd-cryptenroll --unlock-key-file="${tmp_key_file}" --tpm2-device=auto "${LUKS_ROOT_PARTITION}" --tpm2-pcrs="0"
 
-    #         fi
-    #     fi
-    # fi
+                # If we reach here, all operations succeeded; securely delete the file
+                shred -u "$tmp_key_file"
+
+            fi
+        fi
+    fi
+
+
+	dpkg -l 'linux-image-[0-9]*' | awk '/^ii/ {print $2}' | xargs dpkg-reconfigure
+
 
     #bootctl update
 
@@ -615,9 +635,9 @@ function host_code
     prepare_installation_disk "${p_disk}"
     setup_system_partition "${p_disk}"
     setup_root_partition "${p_disk}"
-    #setup_luks "${g_root_partition_uuid}"
-    #setup_btrfs ${g_root_partition}
-    setup_ext4 ${g_root_partition}
+    setup_luks "${g_root_partition_uuid}"
+    setup_btrfs ${g_root_partition}
+    #setup_ext4 ${g_root_partition}
     #setup_xfs ${g_root_partition}
     mount_system_partition "${g_efi_system_partition_uuid}"
 
@@ -642,20 +662,26 @@ function host_code
                     --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
                     --directory="${p_target}"\
+                    --bind=/dev/mapper \
+                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+                    --bind="$(realpath "${g_luks_root_partition}")"  \
+                    --bind=/dev/tpm0 \
+                    --bind=/dev/tpmrm0 \
+                    --bind=/sys/class/tpm \
                     -- /my_installer.sh target "$params_for_target"
 
-                    # --bind=/dev/mapper \
-                    # --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
-                    # --bind="$(realpath "${g_luks_root_partition}")"  \
-                    # --bind=/dev/tpm0 \
-                    # --bind=/dev/tpmrm0 \
-                    # --bind=/sys/class/tpm \
  
     systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
                     --machine="${p_hostname}" \
                     --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
-                    --directory="${p_target}" 
+					--bind=/dev/mapper \
+					--bind=/dev/tpm0 \
+                    --bind=/dev/tpmrm0 \
+                    --bind=/sys/class/tpm \
+                    --bind="$(realpath "${g_luks_root_partition}")" \
+                    --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
+                    --directory="${p_target}" -b
 
     host_cleanup
 
