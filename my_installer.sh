@@ -471,6 +471,7 @@ function target_code()
     echo 'add_dracutmodules+=" bash sh zsh busybox ext4 xfs btrfs base "' >> dracut.conf
     echo 'uefi="no"' >> /etc/dracut.conf.d/dracut.conf
     echo 'hostonly="no"' >> /etc/dracut.conf.d/dracut.conf
+    echo 'use_fstab="yes"' >> /etc/dracut.conf.d/dracut.conf
     echo 'add_dracutmodules+=" crypt tpm2-tss systemd plymouth "' >> /etc/dracut.conf.d/dracut.conf
 #    echo 'add-drivers+=" tpm_tis"' >> /etc/dracut.conf.d/dracut.conf
     echo 'add_dracutmodules+=" systemd systemd-sysusers crypt dm rootfs-block btrfs tpm2-tss "' >> /etc/dracut.conf.d/dracut.conf
@@ -479,10 +480,7 @@ function target_code()
     # temporary fix while waiting for #1056665 / #1100919 to be resolved
 	mkdir -p /etc/sysusers.d/
 	echo 'u tss - "TPM2 Software Stack user" /var/lib/tpm' > /etc/sysusers.d/tpm2-tss.conf
-	echo 'g tss - "TPM2 Software Stack group"' >> /etc/sysusers.d/tpm2-tss.conf
-	echo 'u tss - "TPM2 Software Stack user" /var/lib/tpm' > /usr/lib/sysusers.d/tpm2-tss.conf
-	echo 'g tss - "TPM2 Software Stack group"' >> /usr/lib/sysusers.d/tpm2-tss.conf
-
+	echo 'g tss -' >> /etc/sysusers.d/tpm2-tss.conf
 
 
     # temporary fix while waiting for #1095646 to be resolved
@@ -496,11 +494,11 @@ function target_code()
         systemd systemd-boot systemd-cryptsetup cryptsetup systemd-boot-efi systemd-ukify
 
 
-    # plymouth-theme-hamara 
     plymouth-set-default-theme solar
 
     # apt full-upgrade -t "${p_debian_version}"-security -yq
 
+	cp -r /usr/lib/dracut/modules.d/73tpm2-tss /usr/lib/dracut/modules.d/15tpm2-tss
 
 
     # !!!!
@@ -509,10 +507,6 @@ function target_code()
 
     # echo "kernel_cmdline=\"${g_kernel_params}\"" >> /etc/dracut.conf.d/kcmd.conf
 
-    #apt install -yqq tpm2-tools
-
-    #echo 'add_dracutmodules+=" tpm2-tss "' >> /etc/dracut.conf.d/90-tpm.conf
-    #echo 'add_dracutmodules+=" crypt "' > /etc/dracut.conf.d/90-luks.conf
 
     apt autoremove -y --purge
 
@@ -558,20 +552,6 @@ function target_code()
 	dpkg -l 'linux-image-[0-9]*' | awk '/^ii/ {print $2}' | xargs dpkg-reconfigure
 
 
-    #bootctl update
-
-#    export DEBIAN_FRONTEND=noninteractive
-#
-#    systemctl disable systemd-networkd.service  # seems to fight with NetworkManager
-#    systemctl disable systemd-networkd.socket
-#    systemctl disable systemd-networkd-wait-online.service
-
-#    if [ ! -z "${p_nvidia_package}" ]; then
-#      # TODO the debian page says to do this instead:
-#      # echo "options nvidia-drm modeset=1" >> /etc/modprobe.d/nvidia-options.conf
-#      # g_kernel_params="${g_kernel_params} nvidia-drm.modeset=1"
-#    fi
-
 #    if [ "$p_enable_popcon" = true ] ; then
 #        notify enabling popularity-contest
 #        echo "popularity-contest      popularity-contest/participate  boolean true" | debconf-set-selections
@@ -597,18 +577,6 @@ function target_code()
 #        apt install -yqq openssh-server
 #    fi
 
-#    if [ -z "${NON_INTERACTIVE}" ]; then
-#        notify running tasksel
-#        # XXX this does not open for some reason
-#        tasksel
-#    fi
-
-#    if [ ! -z "${p_nvidia_package}" ]; then
-#        notify installing ${p_nvidia_package}
-#        # XXX dracut-install: ERROR: installing nvidia-blacklists-nouveau.conf nvidia.conf
-#        echo 'install_items+=" /etc/modprobe.d/nvidia-blacklists-nouveau.conf /etc/modprobe.d/nvidia.conf /etc/modprobe.d/nvidia-options.conf "' > ${p_target}/etc/dracut.conf.d/10-nvidia.conf
-#        chroot ${p_target}/ apt install -t ${p_backports_version} -y "${p_nvidia_package}" nvidia-driver-libs:i386 linux-headers-amd64
-#    fi
     notify "done"
 }
 
@@ -663,6 +631,7 @@ function host_code
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
                     --directory="${p_target}"\
                     --bind=/dev/mapper \
+                    --bind="$(realpath "/dev/mapper/cryptoroot")" \
                     --setenv=LUKS_ROOT_PARTITION="$(realpath "${g_luks_root_partition}")" \
                     --bind="$(realpath "${g_luks_root_partition}")"  \
                     --bind=/dev/tpm0 \
@@ -670,12 +639,13 @@ function host_code
                     --bind=/sys/class/tpm \
                     -- /my_installer.sh target "$params_for_target"
 
- 
+
     systemd-nspawn  --bind=my_installer.sh:/my_installer.sh \
                     --machine="${p_hostname}" \
                     --bind="${p_disk}" \
                     --bind=/sys/firmware/efi/efivars:/sys/firmware/efi/efivars \
 					--bind=/dev/mapper \
+                    --bind="$(realpath "/dev/mapper/cryptoroot")" \
 					--bind=/dev/tpm0 \
                     --bind=/dev/tpmrm0 \
                     --bind=/sys/class/tpm \
